@@ -7,6 +7,13 @@ info and available documentation.
 (develop)](https://dev.azure.com/ms/Azure-Kinect-Sensor-SDK/_apis/build/status/Microsoft.Azure-Kinect-Sensor-SDK%20(Public)?branchName=develop)](https://dev.azure.com/ms/Azure-Kinect-Sensor-SDK/_build/latest?definitionId=133&branchName=develop)
 [![Nuget](https://img.shields.io/nuget/vpre/Microsoft.Azure.Kinect.Sensor.svg)](https://www.nuget.org/packages/Microsoft.Azure.Kinect.Sensor/)
 
+## CHANGES IN THIS FORK
+- add `playback_all_frames` to the `transformation_example` with methods to playback and save all RGB, depth and pointcloud frames from .mkv file
+- change in k4arecorder to record color images in BGRA format
+  
+Needs installing opencv.
+
+
 ## Introduction
 
 **Azure Kinect SDK** is a cross platform (Linux and Windows) user mode SDK to read data from your Azure Kinect device.

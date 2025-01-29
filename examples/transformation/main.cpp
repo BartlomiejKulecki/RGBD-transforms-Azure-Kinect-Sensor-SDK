@@ -7,6 +7,16 @@
 #include "transformation_helpers.h"
 #include "turbojpeg.h"
 
+#include <iostream>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <vector>
+#include <opencv2/opencv.hpp>
+
+
 static bool point_cloud_color_to_depth(k4a_transformation_t transformation_handle,
                                        const k4a_image_t depth_image,
                                        const k4a_image_t color_image,
@@ -433,10 +443,215 @@ Exit:
     return returnCode;
 }
 
+// ==============================================
+
+// save rgb image using opencv
+bool save_rgb_image_opencv(const k4a_image_t color_image, const std::string &path)
+{
+    if (!color_image)
+    {
+        std::cerr << "Error: Invalid color image." << std::endl;
+        return false;
+    }
+
+    int width = k4a_image_get_width_pixels(color_image);
+    int height = k4a_image_get_height_pixels(color_image);
+    cv::Mat color_image_cv(height, width, CV_8UC4, k4a_image_get_buffer(color_image));
+    cv::imwrite(path, color_image_cv);
+
+    return true;
+}
+
+// save depth image using opencv
+bool save_depth_image_opencv(const k4a_image_t depth_image, const std::string &path)
+{
+    if (!depth_image)
+    {
+        std::cerr << "Error: Invalid depth image." << std::endl;
+        return false;
+    }
+
+    int width = k4a_image_get_width_pixels(depth_image);
+    int height = k4a_image_get_height_pixels(depth_image);
+    cv::Mat depth_image_cv(height, width, CV_16UC1, k4a_image_get_buffer(depth_image));
+    cv::imwrite(path, depth_image_cv);
+
+    return true;
+}
+
+
+bool save_point_cloud(const k4a_image_t point_cloud_image, const k4a_image_t color_image, const std::string &path)
+{
+    if (!point_cloud_image || !color_image)
+    {
+        std::cerr << "Error: Invalid point cloud or color image." << std::endl;
+        return false;
+    }
+
+    try
+    {
+        tranformation_helpers_write_point_cloud(point_cloud_image, color_image, path.c_str());
+    }
+    catch (const std::exception &e)
+    {
+        std::cerr << "Error: Failed to save point cloud: " << e.what() << std::endl;
+        return false;
+    }
+
+    return true;
+}
+
+
+
+static int playback_all_frames(const std::string &input_path, const std::string &output_dir)
+{
+    k4a_playback_t playback = NULL;
+    k4a_capture_t capture = NULL;
+    k4a_image_t depth_image = NULL;
+    k4a_image_t color_image = NULL;
+    k4a_image_t transformed_depth_image = NULL;
+    k4a_image_t point_cloud_image = NULL;
+    k4a_transformation_t transformation = NULL;
+    k4a_calibration_t calibration;
+
+    if (k4a_playback_open(input_path.c_str(), &playback) != K4A_RESULT_SUCCEEDED)
+    {
+        printf("Failed to open playback file: %s\n", input_path.c_str());
+        return 1;
+    }
+
+    if (k4a_playback_get_calibration(playback, &calibration) != K4A_RESULT_SUCCEEDED)
+    {
+        printf("Failed to get calibration from playback file\n");
+        k4a_playback_close(playback);
+        return 1;
+    }
+
+    transformation = k4a_transformation_create(&calibration);
+    if (!transformation)
+    {
+        printf("Failed to create transformation\n");
+        k4a_playback_close(playback);
+        return 1;
+    }
+
+    // Create output directory
+    mkdir((output_dir + "/rgb").c_str(), 0777);
+    mkdir((output_dir + "/depth").c_str(), 0777);
+    mkdir((output_dir + "/pcl").c_str(), 0777);
+
+
+    int frame_index = 0;
+    while (k4a_playback_get_next_capture(playback, &capture) == K4A_STREAM_RESULT_SUCCEEDED)
+    {
+        depth_image = k4a_capture_get_depth_image(capture);
+        color_image = k4a_capture_get_color_image(capture);
+
+        printf("Processing frame %d\n", frame_index);
+        if (!depth_image || !color_image)
+        {
+            printf("Skipping frame %d due to missing images\n", frame_index);
+            if (depth_image)
+                k4a_image_release(depth_image);
+            if (color_image)
+                k4a_image_release(color_image);
+            k4a_capture_release(capture);
+            frame_index++;
+            continue;
+        }
+
+        // Save RGB image
+        std::string rgb_path = output_dir + "/rgb/frame_" + std::to_string(frame_index) + ".png";
+        if (!save_rgb_image_opencv(color_image, rgb_path))
+        {
+            printf("Failed to save cv RGB image for frame %d\n", frame_index);
+        }
+
+        // Transform depth to color geometry
+        int width = k4a_image_get_width_pixels(color_image);
+        int height = k4a_image_get_height_pixels(color_image);
+
+        if (k4a_image_create(K4A_IMAGE_FORMAT_DEPTH16, width, height, width * sizeof(uint16_t), &transformed_depth_image) != K4A_RESULT_SUCCEEDED)
+        {
+            printf("Failed to create transformed depth image\n");
+            k4a_image_release(depth_image);
+            k4a_image_release(color_image);
+            k4a_capture_release(capture);
+            break;
+        }
+
+        if (k4a_transformation_depth_image_to_color_camera(transformation, depth_image, transformed_depth_image) != K4A_RESULT_SUCCEEDED)
+        {
+            printf("Failed to transform depth image\n");
+            k4a_image_release(depth_image);
+            k4a_image_release(color_image);
+            k4a_image_release(transformed_depth_image);
+            k4a_capture_release(capture);
+            break;
+        }
+
+        // Save depth image
+        std::string depth_path = output_dir + "/depth/frame_" + std::to_string(frame_index) + ".png";
+        if (!save_depth_image_opencv(transformed_depth_image, depth_path))
+        {
+            printf("Failed to save cv depth image for frame %d\n", frame_index);
+        }
+
+        // Create point cloud
+        if (k4a_image_create(K4A_IMAGE_FORMAT_CUSTOM, width, height, width * 3 * sizeof(int16_t), &point_cloud_image) != K4A_RESULT_SUCCEEDED)
+        {
+            printf("Failed to create point cloud image\n");
+            k4a_image_release(depth_image);
+            k4a_image_release(color_image);
+            k4a_image_release(transformed_depth_image);
+            k4a_capture_release(capture);
+            break;
+        }
+
+        if (k4a_transformation_depth_image_to_point_cloud(transformation, transformed_depth_image, K4A_CALIBRATION_TYPE_COLOR, point_cloud_image) != K4A_RESULT_SUCCEEDED)
+        {
+            printf("Failed to create point cloud\n");
+            k4a_image_release(depth_image);
+            k4a_image_release(color_image);
+            k4a_image_release(transformed_depth_image);
+            k4a_image_release(point_cloud_image);
+            k4a_capture_release(capture);
+            break;
+        }
+
+        // Save point cloud
+        std::string pcl_path = output_dir + "/pcl/frame_" + std::to_string(frame_index) + ".ply";
+        if (!save_point_cloud(point_cloud_image, color_image, pcl_path))
+        {
+            printf("Failed to save point cloud for frame %d\n", frame_index);
+        }
+
+        // Release resources
+        if (depth_image)
+            k4a_image_release(depth_image);
+        if (color_image)
+            k4a_image_release(color_image);
+        if (transformed_depth_image)
+            k4a_image_release(transformed_depth_image);
+        if (point_cloud_image)
+            k4a_image_release(point_cloud_image);
+        if (capture)
+            k4a_capture_release(capture);
+
+        frame_index++;
+    }
+
+    k4a_transformation_destroy(transformation);
+    k4a_playback_close(playback);
+
+    return 0;
+}
+
 static void print_usage()
 {
     printf("Usage: transformation_example capture <output_directory> [device_id]\n");
     printf("Usage: transformation_example playback <filename.mkv> [timestamp (ms)] [output_file]\n");
+    printf("Usage: transformation_example playback_all_frames <input_file.mkv> <output_directory>\n");
 }
 
 int main(int argc, char **argv)
@@ -483,6 +698,10 @@ int main(int argc, char **argv)
             {
                 print_usage();
             }
+        }
+        else if (mode == "playback_all_frames")
+        {
+            return playback_all_frames(argv[2], argv[3]);
         }
         else
         {
